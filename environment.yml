@@ -1,0 +1,10 @@
+name: face-api-venv
+channels:
+  - conda-forge
+dependencies:
+  - face_recognition
+  - fastapi
+  - uvicorn
+  - python-multipart
+  - numpy
+  - pillow
