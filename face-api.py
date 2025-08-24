@@ -10,6 +10,7 @@ from fastapi.encoders import jsonable_encoder
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
 import requests
+import re
 
 app = FastAPI()
 app.add_middleware(
@@ -118,12 +119,16 @@ async def verify_face(
             match_count += 1
 
     verified = (match_count >= 3)  # 3 ใน 4 = true, อื่นๆ false (รวมถึง 1/4 และ 2/4)
-
+    
+    def safe_id(s: str) -> str:
+        # อนุญาตตัวเลข/ตัวอักษร/_- (คงเครื่องหมาย - ไว้สำหรับรูปแบบ 64-040603-4567-0)
+        return re.sub(r"[^0-9A-Za-z_-]", "", str(s or "")).strip()
     # เซฟรูปเสมอหรือเฉพาะตอน verified?
     # ตามสเปก: เซฟรูปเมื่อ verified เท่านั้น
     saved_paths = {}
     if verified:
-        folder_path = os.path.join("user", fullname)  # <== ตามสเปกใหม่: ใช้ชื่อคนเป็นชื่อโฟลเดอร์
+        sid = safe_id(studentID)            # ← ใช้ studentID เป็นชื่อโฟลเดอร์
+        folder_path = os.path.join("user", sid)
         os.makedirs(folder_path, exist_ok=True)
 
         for key in ["front", "left", "right", "up", "down"]:
