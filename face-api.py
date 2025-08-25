@@ -12,6 +12,22 @@ from starlette.responses import StreamingResponse
 import requests
 import re
 
+ANTI_SPOOF_ENABLE = True
+YOLO_MODEL_PATH   = "./models/l_version_1_300.pt"
+REAL_MIN_CONF     = 0.50   # ต้องเจอ real >= ค่านี้
+FAKE_BLOCK_CONF   = 0.50
+
+yolo_anti_spoof = None
+try:
+    from ultralytics import YOLO
+    if ANTI_SPOOF_ENABLE:
+        yolo_anti_spoof = YOLO(YOLO_MODEL_PATH)
+        print(f"[AntiSpoof] YOLO model loaded: {YOLO_MODEL_PATH}")
+except Exception as e:
+    yolo_anti_spoof = None
+    print(f"[AntiSpoof] Failed to load YOLO model: {e}. Anti-spoof DISABLED.")
+# ---------------------------------------------------------------------
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
@@ -40,6 +56,48 @@ def encode_single_face(upload: UploadFile):
         return None
     encodings = face_recognition.face_encodings(np_img, locations)
     return encodings[0] if encodings else None
+
+def check_anti_spoof(np_image: np.ndarray):
+    if not ANTI_SPOOF_ENABLE or yolo_anti_spoof is None:
+        return {"decision": "skipped", "label": "skipped", "confidence": 0.0, "raw": [], "reason": None}
+
+    # YOLO รองรับ np.ndarray (RGB ก็ได้)
+    res = yolo_anti_spoof(np_image, stream=False, verbose=False)[0]
+
+    raw = []
+    has_blocking_fake = False
+    best_real_conf = 0.0
+    num_boxes = 0
+
+    if res.boxes is not None:
+        num_boxes = len(res.boxes)
+        for box in res.boxes:
+            conf = float(box.conf[0])
+            cls  = int(box.cls[0])
+            # ตามชุดโมเดลของคุณ: 0=fake, 1=real
+            label = "fake" if cls == 0 else "real"
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            raw.append({"label": label, "confidence": conf, "bbox": [x1, y1, x2, y2]})
+            if label == "fake" and conf >= FAKE_BLOCK_CONF:
+                has_blocking_fake = True
+            elif label == "real":
+                best_real_conf = max(best_real_conf, conf)
+
+    if num_boxes == 0:
+        return {"decision": "unknown", "label": "unknown", "confidence": 0.0, "raw": raw, "reason": "no_face"}
+    if num_boxes > 1:
+        # แนะนำให้มีใบหน้าเดียวในเฟรม
+        return {"decision": "unknown", "label": "unknown", "confidence": best_real_conf, "raw": raw, "reason": "multi_face"}
+
+    if has_blocking_fake:
+        # พบ fake เข้ม -> ตกทันที
+        return {"decision": "block", "label": "fake", "confidence": 1.0, "raw": raw, "reason": None}
+    if best_real_conf >= REAL_MIN_CONF:
+        # ไม่พบ fake เข้ม + real ถึงเกณฑ์ -> ผ่าน
+        return {"decision": "pass", "label": "real", "confidence": best_real_conf, "raw": raw, "reason": None}
+    # ไม่เข้าเงื่อนไขใด -> ไม่ชัด ให้ถ่ายใหม่
+    return {"decision": "unknown", "label": "unknown", "confidence": best_real_conf, "raw": raw, "reason": None}
+# ---------------------------------------------------------------
 
 # 🔵 Endpoint เดิม: ตรวจสอบชื่อจากภาพเดียว
 @app.post("/faces_recognition/")
@@ -156,13 +214,41 @@ async def scan_face(
     studentID: str = Form(...),
     image: UploadFile = File(...),
 ):
-    """
-    รับภาพ + fullname + studentID จาก Frontend
-    -> แปลงภาพเป็น face vector
-    -> เรียก Backend /api/face/verify-vector-by-id เพื่อเทียบ 'เฉพาะ studentID คนนั้น'
-    -> ส่งผล match true/false กลับให้ Frontend
-    """
     try:
+        image.file.seek(0)
+        data = image.file.read()
+        img_rgb = Image.open(io.BytesIO(data)).convert("RGB")
+        np_img = np.array(img_rgb)
+        
+        asp = check_anti_spoof(np_img)
+        if asp["decision"] in ("block", "unknown"):
+            # ตีกลับทันที (ไม่เรียก backend)
+            if asp["decision"] == "block":
+                return {
+                    "ok": False,
+                    "match": False,
+                    "reason": "anti_spoof_failed",
+                    "spoof_label": asp.get("label"),
+                    "spoof_confidence": round(float(asp.get("confidence", 0.0)), 3),
+                    "message": "ภาพไม่น่าเชื่อถือ อาจเป็นภาพจากหน้าจอ/อุปกรณ์อื่น กรุณาถ่ายใหม่"
+                }
+            # unknown
+            msg = "ตรวจไม่ชัด ขอถ่ายใหม่ (หันหน้าให้ตรง/ปรับแสง/อย่าให้เบลอ)"
+            if asp.get("reason") == "no_face":
+                msg = "ไม่พบใบหน้า กรุณาเข้าใกล้และให้แสงเพียงพอ"
+            elif asp.get("reason") == "multi_face":
+                msg = "กรุณาให้มีเพียง 1 ใบหน้าในภาพ"
+            return {
+                "ok": False,
+                "match": False,
+                "reason": "anti_spoof_unknown",
+                "spoof_label": asp.get("label"),
+                "spoof_confidence": round(float(asp.get("confidence", 0.0)), 3),
+                "message": msg
+            }
+        
+        image.file.seek(0)
+        
         enc = encode_single_face(image)
         if enc is None:
             return {"ok": False, "match": False, "message": "❌ ไม่พบใบหน้าในภาพ"}
