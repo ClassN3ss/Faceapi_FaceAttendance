@@ -6,5 +6,6 @@ dependencies:
   - fastapi
   - uvicorn
   - python-multipart
+  - requests
   - numpy
   - pillow
