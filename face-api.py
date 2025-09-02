@@ -33,7 +33,7 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://be-attendance-4cec7c12e4bd.herokuapp.com/")
 INTERNAL_KEY = os.getenv("INTERNAL_FACE_API_KEY", "dev-internal-key")
 VERIFY_VECTOR_ENDPOINT = f"{BACKEND_BASE_URL}/api/face/verify-vector-by-id"
 
