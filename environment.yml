@@ -9,4 +9,5 @@ dependencies:
   - requests
   - numpy
   - pillow
-  - "pymongo[srv]==4.9.1"
+  - python-multipart
+  - pymongo[srv]==4.9.1
