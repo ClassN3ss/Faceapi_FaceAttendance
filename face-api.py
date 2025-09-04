@@ -1,16 +1,15 @@
 from PIL import Image, ImageDraw
 import face_recognition
 import numpy as np
-import pickle
 import io
 import os
 from datetime import datetime
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, Request, HTTPException
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
-import requests
 import re
+from pymongo import MongoClient
 
 app = FastAPI()
 app.add_middleware(
@@ -21,11 +20,19 @@ BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://be-attendance-4cec7c12
 INTERNAL_KEY = os.getenv("INTERNAL_FACE_API_KEY", "dev-internal-key")
 VERIFY_VECTOR_ENDPOINT = f"{BACKEND_BASE_URL}/api/face/verify-vector-by-id"
 
-# โหลดฐานข้อมูลใบหน้า
-try:
-    known_face_names, known_face_encodings = pickle.load(open('faces.p', 'rb'))
-except:
-    known_face_names, known_face_encodings = [], []
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://Aadmin:facescan_ab@cluster0.7jxizye.mongodb.net/facescan?retryWrites=true&w=majority&appName=Cluster0")
+MONGODB_DB = os.getenv("MONGODB_DB", "facescan")
+MONGODB_USERS_COLLECTION = os.getenv("MONGODB_USERS_COLLECTION", "users")
+
+mongo_users = None
+if MONGODB_URI:
+    try:
+        mongo_client = MongoClient(MONGODB_URI)
+        mongo_db = mongo_client[MONGODB_DB]
+        mongo_users = mongo_db[MONGODB_USERS_COLLECTION]
+        print(f"[Mongo] Connected to {MONGODB_DB}.{MONGODB_USERS_COLLECTION}")
+    except Exception as e:
+        print(f"[Mongo] Connect FAILED: {e}")
     
 def encode_single_face(upload: UploadFile):
     """
@@ -41,41 +48,25 @@ def encode_single_face(upload: UploadFile):
     encodings = face_recognition.face_encodings(np_img, locations)
     return encodings[0] if encodings else None
 
-# 🔵 Endpoint เดิม: ตรวจสอบชื่อจากภาพเดียว
-@app.post("/faces_recognition/")
-async def faces_recognition(image_upload: UploadFile = File(...)):
-    data = await image_upload.read()
-    image = Image.open(io.BytesIO(data))
-    
-    face_location = face_recognition.face_locations(np.array(image))
-    face_encoding = face_recognition.face_encodings(np.array(image), face_location)
-    
-    draw = ImageDraw.Draw(image)
-    face_names = []
+def is_vec128(v):
+    try:
+        return isinstance(v, (list, tuple)) and len(v) == 128 and all(isinstance(x, (int, float)) for x in v)
+    except:
+        return False
 
-    if face_encoding:
-        for face_encodings, face_locations in zip(face_encoding, face_location):
-            face_distances = face_recognition.face_distance(known_face_encodings, face_encodings)
-            best_match_index = np.argmin(face_distances)
-            
-            threshold = 0.5
-            if face_distances[best_match_index] < threshold:
-                name = known_face_names[best_match_index]
-            else:
-                name = "Unknown"
-            
-            top, right, bottom, left = face_locations
-            draw.rectangle([left, top, right, bottom])
-            draw.text((left, top), name)
-            face_names.append(name)
-    else:
-        print("❗ ไม่พบใบหน้าในภาพ")
-    
-    image_byte_arr = io.BytesIO()
-    image.save(image_byte_arr, format='PNG')
-    image_byte_arr = image_byte_arr.getvalue()
-    
-    return StreamingResponse(io.BytesIO(image_byte_arr), media_type='image/png')
+def collect_vectors_from_userdoc(doc):
+    refs = []
+    enc = doc.get("faceEncodings")
+    if isinstance(enc, list):
+        for i, v in enumerate(enc):
+            if is_vec128(v):
+                refs.append((v, f"enc[{i}]"))
+    elif isinstance(enc, dict):
+        for k in ["front", "left", "right", "up", "down"]:
+            v = enc.get(k)
+            if is_vec128(v):
+                refs.append((v, k))
+    return refs
 
 # 🔴 Endpoint ใหม่: ตรวจสอบภาพ 5 มุม และบันทึกภาพ + vector ถ้า verified
 @app.post("/api/verify-face")
@@ -152,50 +143,54 @@ async def verify_face(
 
 @app.post("/api/scan-face")
 async def scan_face(
-    fullname: str = Form(...),
-    studentID: str = Form(...),
+    request: Request,
     image: UploadFile = File(...),
+    studentID: str = Form(...),
+    # fullname: str = Form(None),
+    threshold: float = Form(None),
 ):
-    try:
-        enc = encode_single_face(image)
-        if enc is None:
-            return {"ok": False, "match": False, "message": "❌ ไม่พบใบหน้าในภาพ"}
+    # auth ภายใน
+    if request.headers.get("x-internal-key") != INTERNAL_KEY:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
-        payload = {
-            "studentID": str(studentID).strip(),
-            "faceVector": enc.tolist(),
-        }
+    # encode ใบหน้า
+    enc = encode_single_face(image)
+    if enc is None:
+        return {"ok": False, "match": False, "message": "no face detected"}
 
-        resp = requests.post(
-            VERIFY_VECTOR_ENDPOINT,
-            json=payload,
-            headers={"x-internal-key": INTERNAL_KEY, "Content-Type": "application/json"},
-            timeout=10,
-        )
+    # ต้องมีการเชื่อม Mongo
+    if mongo_users is None:
+        return {"ok": False, "match": False, "message": "model has no DB connection"}
 
-        # เผื่อ backend ตอบไม่ใช่ 200
-        if resp.status_code != 200:
-            try:
-                data = resp.json()
-            except Exception:
-                data = {"message": resp.text}
-            return {"ok": False, "match": False, "message": data.get("message", "ตรวจสอบไม่สำเร็จ")}
+    # ดึงเวกเตอร์อ้างอิงจาก MongoDB
+    doc = mongo_users.find_one({"studentId": str(studentID).strip()})
+    if not doc:
+        return {"ok": False, "match": False, "message": "user not found"}
 
-        data = resp.json()
-        if not data.get("ok"):
-            return {"ok": False, "match": False, "message": data.get("message", "ตรวจสอบไม่สำเร็จ")}
+    refs = collect_vectors_from_userdoc(doc)
+    if not refs:
+        return {"ok": False, "match": False, "message": "no reference vectors for this user"}
 
-        return {
-            "ok": True,
-            "match": bool(data.get("match")),
-            "distance": data.get("distance"),
-            "threshold": data.get("threshold"),
-            "studentId": data.get("studentID"),
-            "fullName": fullname,
-        }
+    # เทียบทุกเวกเตอร์
+    distances = []
+    for vec, label in refs:
+        d = float(np.linalg.norm(np.array(vec, dtype=float) - enc))
+        distances.append({"label": label, "distance": d})
+    distances.sort(key=lambda x: x["distance"])
+    best = distances[0]
 
-    except Exception as e:
-        return {"ok": False, "match": False, "message": f"❌ Error: {str(e)}"}
+    thr = float(threshold) if threshold is not None else DEFAULT_MATCH_THRESHOLD
+    match = best["distance"] <= thr
+
+    return {
+        "ok": True,
+        "match": match,
+        "distance": best["distance"],
+        "threshold": thr,
+        "bestRef": best["label"],
+        "studentID": str(studentID).strip(),
+        "countRefs": len(refs),
+    }
     
 def sanitize(name: str) -> str:
     # ตัดอักขระที่ใช้ตั้งชื่อโฟลเดอร์ไม่ได้
