@@ -16,10 +16,7 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://be-attendance-4cec7c12e4bd.herokuapp.com/")
 INTERNAL_KEY = os.getenv("INTERNAL_FACE_API_KEY", "dev-internal-key")
-VERIFY_VECTOR_ENDPOINT = f"{BACKEND_BASE_URL}/api/face/verify-vector-by-id"
-
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://Aadmin:facescan_ab@cluster0.7jxizye.mongodb.net/facescan?retryWrites=true&w=majority&appName=Cluster0")
 MONGODB_DB = os.getenv("MONGODB_DB", "facescan")
 MONGODB_USERS_COLLECTION = os.getenv("MONGODB_USERS_COLLECTION", "users")
@@ -238,18 +235,57 @@ async def encode_and_save(image: UploadFile = File(...), fullname: str = Form(..
     except Exception as e:
         return {"ok": False, "message": str(e)}
 
-@app.post("/api/teacher-scan")
-async def teacher_encode(image: UploadFile = File(...), fullname: str = Form(...)):
-    try:
-        data = await image.read()
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        arr = np.array(img)
-        boxes = face_recognition.face_locations(arr, model="hog")
-        if not boxes:
-            return {"ok": False, "message": "no face detected"}
-        encs = face_recognition.face_encodings(arr, known_face_locations=[boxes[0]])
-        if not encs:
-            return {"ok": False, "message": "cannot encode face"}
-        return {"ok": True, "descriptor": encs[0].tolist(), "fullName": fullname}
-    except Exception as e:
-        return {"ok": False, "message": str(e)}
+@app.post("/api/scan-teacher")
+async def scan_teacher(
+    request: Request,
+    image: UploadFile = File(...),
+    teacherID: str = Form(...),
+    threshold: float = Form(None),
+):
+    # auth ภายใน
+    if request.headers.get("x-internal-key") != INTERNAL_KEY:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    # encode ใบหน้า
+    enc = encode_single_face(image)
+    if enc is None:
+        return {"ok": False, "match": False, "message": "no face detected"}
+
+    # ต้องมีการเชื่อม Mongo
+    if mongo_users is None:
+        return {"ok": False, "match": False, "message": "model has no DB connection"}
+
+    # ดึงเวกเตอร์อ้างอิงของครูจาก MongoDB (ไม่ใช้ ObjectId)
+    doc = mongo_users.find_one({"teacherId": str(teacherID).strip()})
+    if not doc:
+        return {"ok": False, "match": False, "message": "user not found"}
+
+    refs = collect_vectors_from_userdoc(doc)
+    if not refs:
+        return {"ok": False, "match": False, "message": "no reference vectors for this user"}
+
+    # รองรับทั้งแบบ object {front,left,right,up,down} และแบบ array 128
+    refs = collect_vectors_from_userdoc(doc)
+    if not refs:
+        return {"ok": False, "match": False, "message": "no reference vectors for this teacher"}
+
+    # เทียบทุกเวกเตอร์ -> เอาค่าน้อยสุด
+    distances = []
+    for vec, label in refs:
+        d = float(np.linalg.norm(np.array(vec, dtype=float) - enc))
+        distances.append({"label": label, "distance": d})
+    distances.sort(key=lambda x: x["distance"])
+    best = distances[0]
+
+    thr = float(threshold) if threshold is not None else DEFAULT_MATCH_THRESHOLD
+    match = best["distance"] <= thr
+
+    return {
+        "ok": True,
+        "match": match,
+        "distance": best["distance"],
+        "threshold": thr,
+        "bestRef": best["label"],
+        "teacherID": str(teacherID).strip(),
+        "countRefs": len(refs),
+    }
