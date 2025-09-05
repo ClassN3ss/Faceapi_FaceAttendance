@@ -10,6 +10,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
 import re
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 app = FastAPI()
 app.add_middleware(
@@ -64,6 +65,38 @@ def collect_vectors_from_userdoc(doc):
             if is_vec128(v):
                 refs.append((v, k))
     return refs
+
+def try_objectid(s: str):
+    try:
+        return ObjectId(str(s))
+    except Exception:
+        return None
+
+def find_teacher_doc(teacher_id: str):
+    """
+    พยายามหาเอกสารครูจากหลายคีย์ (_id, teacherId, userId, studentId) ในคอลเลกชัน teachers ก่อน แล้วค่อย users
+    """
+    idstr = str(teacher_id).strip()
+    candidates = []
+    oid = try_objectid(idstr)
+    if oid:
+        candidates.append({"_id": oid})
+    candidates += [
+        {"teacherId": idstr},
+        {"userId": idstr},
+        {"studentId": idstr},
+    ]
+    for coll in [mongo_users]:
+        if coll is None:
+            continue
+        for q in candidates:
+            try:
+                doc = coll.find_one(q)
+                if doc:
+                    return doc
+            except Exception:
+                continue
+    return None
 
 # 🔴 Endpoint ใหม่: ตรวจสอบภาพ 5 มุม และบันทึกภาพ + vector ถ้า verified
 @app.post("/api/verify-face")
@@ -251,20 +284,15 @@ async def scan_teacher(
     if enc is None:
         return {"ok": False, "match": False, "message": "no face detected"}
 
-    # ต้องมีการเชื่อม Mongo
-    if mongo_users is None:
+    # DB พร้อมหรือไม่
+    if mongo_users is None and mongo_users is None:
         return {"ok": False, "match": False, "message": "model has no DB connection"}
 
-    # ดึงเวกเตอร์อ้างอิงของครูจาก MongoDB (ไม่ใช้ ObjectId)
-    doc = mongo_users.find_one({"teacherId": str(teacherID).strip()})
+    # ดึงเวกเตอร์อ้างอิงของครูจาก MongoDB
+    doc = find_teacher_doc(teacherID)
     if not doc:
-        return {"ok": False, "match": False, "message": "user not found"}
+        return {"ok": False, "match": False, "message": "teacher not found"}
 
-    refs = collect_vectors_from_userdoc(doc)
-    if not refs:
-        return {"ok": False, "match": False, "message": "no reference vectors for this user"}
-
-    # รองรับทั้งแบบ object {front,left,right,up,down} และแบบ array 128
     refs = collect_vectors_from_userdoc(doc)
     if not refs:
         return {"ok": False, "match": False, "message": "no reference vectors for this teacher"}
@@ -286,6 +314,6 @@ async def scan_teacher(
         "distance": best["distance"],
         "threshold": thr,
         "bestRef": best["label"],
-        "teacherID": str(teacherID).strip(),
+        "teacherID": str(teacherID),
         "countRefs": len(refs),
     }
