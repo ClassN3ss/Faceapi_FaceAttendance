@@ -183,7 +183,7 @@ async def scan_face(
     image: UploadFile = File(...),
     studentID: str = Form(...),
     # fullname: str = Form(None),
-    threshold: float = Form(None),
+    threshold: float = Form(...),
 ):
     # auth ภายใน
     if request.headers.get("x-internal-key") != INTERNAL_KEY:
@@ -215,7 +215,7 @@ async def scan_face(
     distances.sort(key=lambda x: x["distance"])
     best = distances[0]
 
-    thr = float(threshold) if threshold is not None else DEFAULT_MATCH_THRESHOLD
+    thr = float(threshold)
     match = best["distance"] <= thr
 
     return {
@@ -279,7 +279,7 @@ async def scan_teacher(
     request: Request,
     image: UploadFile = File(...),
     teacherID: str = Form(...),
-    threshold: float = Form(None),
+    threshold: float = Form(...),
 ):
     # auth ภายใน
     if request.headers.get("x-internal-key") != INTERNAL_KEY:
@@ -289,22 +289,16 @@ async def scan_teacher(
     enc = encode_single_face(image)
     if enc is None:
         return {"ok": False, "match": False, "message": "no face detected"}
-
+    
+    if not ObjectId.is_valid(teacherID):
+        return {"ok": False, "match": False, "message": "invalid teacher _id"}
+    
     # DB พร้อมหรือไม่
     if mongo_users is None:
         return {"ok": False, "match": False, "message": "model has no DB connection"}
 
     # ดึงเวกเตอร์อ้างอิงของครูจาก MongoDB
-    tid = str(teacherID).strip()
-    doc = None
-
-    # ถ้า teacherID เป็นรูป ObjectId ให้ค้นด้วย _id จากคอลเลกชัน users
-    if ObjectId.is_valid(tid):
-        try:
-            doc = mongo_users.find_one({"_id": ObjectId(tid)})
-        except Exception:
-            doc = None
-            
+    doc = mongo_users.find_one({"_id": ObjectId(teacherID)})   # ← ค้นใน users
     if not doc:
         return {"ok": False, "match": False, "message": "teacher not found"}
 
@@ -320,7 +314,7 @@ async def scan_teacher(
     distances.sort(key=lambda x: x["distance"])
     best = distances[0]
 
-    thr = float(threshold) if threshold is not None else DEFAULT_MATCH_THRESHOLD
+    thr = float(threshold)
     match = best["distance"] <= thr
 
     return {
