@@ -55,15 +55,21 @@ def is_vec128(v):
 def collect_vectors_from_userdoc(doc):
     refs = []
     enc = doc.get("faceEncodings")
-    if isinstance(enc, list):
+    
+    if isinstance(enc, list) and len(enc) == 128 and all(isinstance(x, (int, float)) for x in enc):
+        refs.append((enc, "enc"))
+        
+    elif isinstance(enc, list):
         for i, v in enumerate(enc):
             if is_vec128(v):
                 refs.append((v, f"enc[{i}]"))
+                
     elif isinstance(enc, dict):
         for k in ["front", "left", "right", "up", "down"]:
             v = enc.get(k)
             if is_vec128(v):
                 refs.append((v, k))
+                
     return refs
 
 def try_objectid(s: str):
