@@ -285,11 +285,20 @@ async def scan_teacher(
         return {"ok": False, "match": False, "message": "no face detected"}
 
     # DB พร้อมหรือไม่
-    if mongo_users is None and mongo_users is None:
+    if mongo_users is None:
         return {"ok": False, "match": False, "message": "model has no DB connection"}
 
     # ดึงเวกเตอร์อ้างอิงของครูจาก MongoDB
-    doc = find_teacher_doc(teacherID)
+    tid = str(teacherID).strip()
+    doc = None
+
+    # ถ้า teacherID เป็นรูป ObjectId ให้ค้นด้วย _id จากคอลเลกชัน users
+    if ObjectId.is_valid(tid):
+        try:
+            doc = mongo_users.find_one({"_id": ObjectId(tid)})
+        except Exception:
+            doc = None
+            
     if not doc:
         return {"ok": False, "match": False, "message": "teacher not found"}
 
