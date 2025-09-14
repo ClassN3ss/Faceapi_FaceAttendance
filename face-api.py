@@ -79,8 +79,8 @@ async def verify_face(
     front: UploadFile = File(...),
     left: UploadFile = File(...),
     right: UploadFile = File(...),
-    up: UploadFile = File(...),
-    down: UploadFile = File(...),
+    # up: UploadFile = File(...),
+    # down: UploadFile = File(...),
 ):
     def image_to_encoding(upload: UploadFile):
         if not upload:
@@ -97,8 +97,8 @@ async def verify_face(
         "front": front,
         "left": left,
         "right": right,
-        "up": up,
-        "down": down,
+        # "up": up,
+        # "down": down,
     }
 
     encodings = {}
@@ -113,14 +113,14 @@ async def verify_face(
     enc_front = np.array(encodings["front"], dtype=float)
     match_count = 0
 
-    for key in ["left", "right", "up", "down"]:
+    for key in ["left", "right"]:
         enc_extra = np.array(encodings[key], dtype=float)
         matches = face_recognition.compare_faces([enc_front], enc_extra, tolerance=threshold)
         if bool(matches[0]):
             match_count += 1
 
     # 3) เงื่อนไขผ่าน: ต้องมี front + extra ≥ 1 match
-    verified = match_count > 1
+    verified = match_count > 0
 
     return {
         "verified": verified,
