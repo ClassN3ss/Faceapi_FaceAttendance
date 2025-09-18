@@ -119,8 +119,7 @@ async def verify_face(
         if bool(matches[0]):
             match_count += 1
 
-    # 3) เงื่อนไขผ่าน: ต้องมี front + extra ≥ 1 match
-    verified = match_count >= 1
+    verified = match_count >= 2
 
     return {
         "verified": verified,
